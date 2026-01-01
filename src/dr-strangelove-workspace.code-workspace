@@ -1,0 +1,41 @@
+{
+	"folders": [
+		{
+			"name": "teensy blink",
+			"path": "../../teensy blink"
+		},
+		{
+			"name": "TeensyLED",
+			"path": "../../TeensyLED"
+		},
+		{
+			"name": "Teensy analog input",
+			"path": "../../Teensy analog input"
+		},
+		{
+			"name": "TeensyLED with sliders",
+			"path": "../../TeensyLED with sliders"
+		},
+		{
+			"name": "Basic Blink",
+			"path": "../../Basic Blink"
+		},
+		{
+			"name": "Teensy Stepper and TFT display",
+			"path": "../../Teensy Stepper and TFT display"
+		},
+		{
+			"name": "Greyhound",
+			"path": "../../Greyhound"
+		},
+		{
+			"name": "basic stepper move for DrS",
+			"path": "../../basic stepper move for DrS"
+		},
+		{
+			"name": "DrS main",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}
