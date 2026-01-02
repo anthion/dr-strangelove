@@ -21,6 +21,14 @@
 #define QPD_C     16  // Bottom left (A2)
 #define QPD_D     17  // Top left (A3)
 
+// QPD display on LEFT side of screen
+#define QPD_DISPLAY_X      10      
+#define QPD_DISPLAY_Y      30      // Move up - start below mode text
+#define QPD_DISPLAY_SIZE   200     // 200x200 fits in 240 height
+#define QPD_CENTER_X       (QPD_DISPLAY_X + QPD_DISPLAY_SIZE/2)
+#define QPD_CENTER_Y       (QPD_DISPLAY_Y + QPD_DISPLAY_SIZE/2)
+
+
 // System modes
 enum SystemMode {
     DISABLED,
@@ -67,7 +75,190 @@ const uint32_t COLOR_MANUAL   = 0x001010;
 const uint32_t COLOR_AUTO     = 0x001000;
 const uint32_t COLOR_OFF      = 0x000000;
 
+GFXcanvas16 qpd_canvas(QPD_DISPLAY_SIZE, QPD_DISPLAY_SIZE);
+SystemMode lastMode = DISABLED;
+bool displayInitialized = false;
+
+void initializeQPDCanvas() {
+
+    // Draw static QPD elements on canvas (only once)
+    qpd_canvas.fillScreen(ST77XX_BLACK);
+    
+    // Border
+    qpd_canvas.drawRect(0, 0, QPD_DISPLAY_SIZE, QPD_DISPLAY_SIZE, ST77XX_WHITE);
+    
+    // Quadrant lines (gray)
+    uint16_t gray = tft.color565(128, 128, 128);  // Use tft, not qpd_canvas
+    qpd_canvas.drawFastVLine(QPD_DISPLAY_SIZE/2, 0, QPD_DISPLAY_SIZE, gray);
+    qpd_canvas.drawFastHLine(0, QPD_DISPLAY_SIZE/2, QPD_DISPLAY_SIZE, gray);
+    
+    // Quadrant labels
+    qpd_canvas.setTextSize(1);
+    qpd_canvas.setTextColor(gray);
+    qpd_canvas.setCursor(5, 5);
+    qpd_canvas.print("D");
+    qpd_canvas.setCursor(QPD_DISPLAY_SIZE - 15, 5);
+    qpd_canvas.print("A");
+    qpd_canvas.setCursor(5, QPD_DISPLAY_SIZE - 15);
+    qpd_canvas.print("C");
+    qpd_canvas.setCursor(QPD_DISPLAY_SIZE - 15, QPD_DISPLAY_SIZE - 15);
+    qpd_canvas.print("B");
+}
+
+void updateQPDCanvas() {
+
+    // Blank just the center area (preserve border)
+    qpd_canvas.fillRect(1, 1, QPD_DISPLAY_SIZE-2, QPD_DISPLAY_SIZE-2, ST77XX_BLACK);
+    
+    // Redraw quadrant lines
+    uint16_t gray = tft.color565(128, 128, 128);  // Use tft, not qpd_canvas
+    qpd_canvas.drawFastVLine(QPD_DISPLAY_SIZE/2, 1, QPD_DISPLAY_SIZE-2, gray);
+    qpd_canvas.drawFastHLine(1, QPD_DISPLAY_SIZE/2, QPD_DISPLAY_SIZE-2, gray);
+    
+    // Redraw labels
+    qpd_canvas.setTextSize(1);
+    qpd_canvas.setTextColor(gray);
+    qpd_canvas.setCursor(5, 5);
+    qpd_canvas.print("D");
+    qpd_canvas.setCursor(QPD_DISPLAY_SIZE - 15, 5);
+    qpd_canvas.print("A");
+    qpd_canvas.setCursor(5, QPD_DISPLAY_SIZE - 15);
+    qpd_canvas.print("C");
+    qpd_canvas.setCursor(QPD_DISPLAY_SIZE - 15, QPD_DISPLAY_SIZE - 15);
+    qpd_canvas.print("B");
+    
+    // Calculate dot position (relative to canvas, not screen)
+    int dotX = (QPD_DISPLAY_SIZE/2) + (errorX / 8);
+    int dotY = (QPD_DISPLAY_SIZE/2) - (errorY / 8);
+    
+    // Clamp to canvas area
+    dotX = constrain(dotX, 5, QPD_DISPLAY_SIZE - 5);
+    dotY = constrain(dotY, 5, QPD_DISPLAY_SIZE - 5);
+    
+    // Draw dot
+    qpd_canvas.fillCircle(dotX, dotY, 4, ST77XX_RED);
+    
+    // Blit entire canvas to screen in one operation
+    tft.drawRGBBitmap(QPD_DISPLAY_X, QPD_DISPLAY_Y,
+                      qpd_canvas.getBuffer(),
+                      qpd_canvas.width(),
+                      qpd_canvas.height());
+}
+
+void initializeDisplay() {
+
+    tft.fillScreen(ST77XX_BLACK);
+    
+    // Mode at very top
+    tft.setTextSize(2);
+    tft.setCursor(10, 5);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print("Mode: ");
+    
+    // QPD visualization box border - just the outline, canvas handles the rest
+    // (Actually, don't draw this either - the canvas draws its own border)
+    
+    // Data/text area - RIGHT SIDE (starting at X=220)
+    tft.setTextSize(1);
+    //tft.setCursor(220, 30);
+    //tft.setTextColor(ST77XX_CYAN);
+    //tft.print("QPD:");
+    
+    tft.setCursor(220, 60);
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.print("Err X:");
+    
+    tft.setCursor(220, 75);
+    tft.print("Err Y:");
+    
+    tft.setCursor(220, 100);
+    tft.setTextColor(ST77XX_GREEN);
+    tft.print("Power:");
+    
+    tft.setCursor(220, 130);
+    tft.setTextColor(ST77XX_CYAN);
+    tft.print("Enc X:");
+    
+    tft.setCursor(220, 145);
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.print("Enc Y:");
+    
+    displayInitialized = true;
+}
+
+
+void updateDisplayValues() {
+
+    tft.setTextWrap(false); 
+    
+    // Update mode ONLY if it changed
+    if (currentMode != lastMode) {
+        tft.fillRect(70, 5, 130, 16, ST77XX_BLACK);
+        tft.setCursor(70, 5);
+        tft.setTextSize(2);
+        switch(currentMode) {
+            case DISABLED: 
+                tft.setTextColor(ST77XX_RED);
+                tft.print("DISABLED"); 
+                break;
+            case MANUAL: 
+                tft.setTextColor(ST77XX_CYAN);
+                tft.print("MANUAL"); 
+                break;
+            case AUTO: 
+                tft.setTextColor(ST77XX_GREEN);
+                tft.print("AUTO"); 
+                break;
+        }
+        lastMode = currentMode;
+    }
+    
+    // Update QPD raw values - REWRITE to prevent overflow
+    tft.fillRect(220, 40, 95, 20, ST77XX_BLACK);  // Taller erase (20 instead of 10)
+    tft.setTextSize(1);
+    tft.setTextColor(ST77XX_CYAN);
+    
+    // Put all QPD values on separate lines to prevent wrapping
+    tft.setCursor(220, 40);
+    tft.print("A:"); tft.print(qpd_a);
+    tft.print(" B:"); tft.print(qpd_b);
+    
+    tft.setCursor(220, 50);
+    tft.print("C:"); tft.print(qpd_c);
+    tft.print(" D:"); tft.print(qpd_d);
+    // Update errors
+    tft.fillRect(265, 60, 50, 10, ST77XX_BLACK);
+    tft.setCursor(265, 60);
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.print(errorX);
+    
+    tft.fillRect(265, 75, 50, 10, ST77XX_BLACK);
+    tft.setCursor(265, 75);
+    tft.print(errorY);
+    
+    // Update total power
+    tft.fillRect(220, 110, 95, 10, ST77XX_BLACK);
+    tft.setCursor(220, 110);
+    tft.setTextColor(ST77XX_GREEN);
+    tft.print(totalPower);
+    
+    // Update encoder positions
+    tft.fillRect(265, 130, 50, 10, ST77XX_BLACK);
+    tft.setCursor(265, 130);
+    tft.setTextColor(ST77XX_CYAN);
+    tft.print(encoderX_position);
+    
+    tft.fillRect(265, 145, 50, 10, ST77XX_BLACK);
+    tft.setCursor(265, 145);
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.print(encoderY_position);
+    
+    // Update QPD display (canvas approach)
+    updateQPDCanvas();
+}
+
 void readQPD() {
+
     qpd_a = analogRead(QPD_A);  // Top right
     qpd_b = analogRead(QPD_B);  // Bottom right
     qpd_c = analogRead(QPD_C);  // Bottom left
@@ -122,78 +313,8 @@ void handleModeButton() {
     updateModeLEDs();
 }
 
-void updateDisplay() {
-    tft.fillScreen(ST77XX_BLACK);
-    
-    // Display mode
-    tft.setCursor(10, 10);
-    tft.setTextSize(2);
-    tft.setTextColor(ST77XX_WHITE);
-    tft.print("Mode: ");
-    
-    switch(currentMode) {
-        case DISABLED: 
-            tft.setTextColor(ST77XX_RED);
-            tft.print("DISABLED"); 
-            break;
-        case MANUAL: 
-            tft.setTextColor(ST77XX_CYAN);
-            tft.print("MANUAL"); 
-            break;
-        case AUTO: 
-            tft.setTextColor(ST77XX_GREEN);
-            tft.print("AUTO"); 
-            break;
-    }
-    
-    // QPD values (small text)
-    tft.setTextSize(1);
-    tft.setCursor(10, 40);
-    tft.setTextColor(ST77XX_CYAN);
-    tft.print("QPD: A:"); tft.print(qpd_a);
-    tft.print(" B:"); tft.print(qpd_b);
-    tft.print(" C:"); tft.print(qpd_c);
-    tft.print(" D:"); tft.println(qpd_d);
-    
-    // Errors
-    tft.setCursor(10, 55);
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.print("Error X:"); tft.print(errorX);
-    tft.print("  Y:"); tft.println(errorY);
-    
-    tft.setCursor(10, 70);
-    tft.setTextColor(ST77XX_GREEN);
-    tft.print("Total Power: "); tft.println(totalPower);
-    
-    // Encoder positions
-    tft.setCursor(10, 90);
-    tft.setTextColor(ST77XX_CYAN);
-    tft.setTextSize(1);
-    tft.print("Enc X: ");
-    tft.print(encoderX_position);
-    
-    tft.setCursor(10, 105);
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.print("Enc Y: ");
-    tft.print(encoderY_position);
-    
-    // Simple crosshair showing QPD error
-    int centerX = 240;
-    int centerY = 160;
-    
-    // Map error to screen position (scale as needed)
-    int dotX = centerX + (errorX / 4);
-    int dotY = centerY + (errorY / 4);
-    
-    // Draw crosshair
-    tft.drawFastHLine(centerX - 20, centerY, 40, ST77XX_RED);
-    tft.drawFastVLine(centerX, centerY - 20, 40, ST77XX_RED);
-    
-    // Draw error position dot
-    tft.fillCircle(dotX, dotY, 3, ST77XX_WHITE);
-}
-
 void setup() {
+
     Serial.begin(115200);
     delay(1000);
     Serial.println("Dr. Strangelove - Full Integration Test");
@@ -244,7 +365,8 @@ void setup() {
     
     // Initial QPD read
     readQPD();
-    updateDisplay();
+    initializeDisplay();
+    initializeQPDCanvas();
 }
 
 void loop() {
@@ -284,7 +406,10 @@ void loop() {
     
     // Update display at fixed rate or when something changes
     if ((now - lastDisplayUpdate >= DISPLAY_UPDATE_MS) || encoderMoved) {
-        updateDisplay();
+        if (!displayInitialized) {
+            initializeDisplay();
+        }
+        updateDisplayValues();
         lastDisplayUpdate = now;
         
         // Serial output for debugging
