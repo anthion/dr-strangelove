@@ -4,6 +4,7 @@
 #include <Wire.h>
 #include <Adafruit_seesaw.h>
 #include <seesaw_neopixel.h>
+#include <AccelStepper.h>
 
 // Pin definitions
 #define LCD_CS    10
@@ -14,6 +15,13 @@
 #define ENCODER_Y_ADDR  0x37
 #define SS_SWITCH 24
 #define SS_NEOPIXEL 6
+
+// Motor pins
+#define STEP_X    0
+#define DIR_X     1
+#define STEP_Y    2
+#define DIR_Y     3
+#define MOTOR_EN  4
 
 // QPD analog inputs
 #define QPD_A     14  // Top right (A0)
@@ -37,6 +45,10 @@ enum SystemMode {
 };
 
 SystemMode currentMode = DISABLED;
+
+// Initialize steppers
+AccelStepper stepperX(AccelStepper::DRIVER, STEP_X, DIR_X);
+AccelStepper stepperY(AccelStepper::DRIVER, STEP_Y, DIR_Y);
 
 // Initialize display
 Adafruit_ST7789 tft = Adafruit_ST7789(LCD_CS, LCD_DC, LCD_RST);
@@ -78,6 +90,10 @@ const uint32_t COLOR_OFF      = 0x000000;
 GFXcanvas16 qpd_canvas(QPD_DISPLAY_SIZE, QPD_DISPLAY_SIZE);
 SystemMode lastMode = DISABLED;
 bool displayInitialized = false;
+
+
+const int STEPS_PER_ENCODER_CLICK = 10;  // Adjust for desired sensitivity
+
 
 void initializeQPDCanvas() {
 
@@ -299,26 +315,41 @@ void handleModeButton() {
         case DISABLED:
             currentMode = MANUAL;
             Serial.println("Mode: MANUAL");
+            digitalWrite(MOTOR_EN, LOW);  // Enable motors (active LOW)
             break;
         case MANUAL:
             currentMode = AUTO;
             Serial.println("Mode: AUTO");
+            // Motors stay enabled
             break;
         case AUTO:
             currentMode = DISABLED;
             Serial.println("Mode: DISABLED");
+            digitalWrite(MOTOR_EN, HIGH);  // Disable motors
             break;
     }
     
     updateModeLEDs();
 }
 
+
 void setup() {
 
     Serial.begin(115200);
     delay(1000);
-    Serial.println("Dr. Strangelove - Full Integration Test");
+    Serial.println("Dr. Strangelove - Motor Control");
     
+    // Configure motor enable pin
+    pinMode(MOTOR_EN, OUTPUT);
+    digitalWrite(MOTOR_EN, HIGH);  // Disable motors initially (TMC2209 enable is active LOW)
+    
+    // Configure steppers
+    stepperX.setMaxSpeed(1000);     // Steps per second
+    stepperX.setAcceleration(500);  // Steps per second^2
+    
+    stepperY.setMaxSpeed(1000);
+    stepperY.setAcceleration(500);
+
     // Initialize display
     tft.init(240, 320);
     tft.setRotation(1);
@@ -367,6 +398,7 @@ void setup() {
     readQPD();
     initializeDisplay();
     initializeQPDCanvas();
+
 }
 
 void loop() {
@@ -397,12 +429,35 @@ void loop() {
     }
     lastButtonY = buttonY;
     
-    // Check if encoders moved
+    // Check if encoders moved and update motors
     bool encoderMoved = (newX != encoderX_position || newY != encoderY_position);
     if (encoderMoved) {
+        // Calculate deltas
+        int32_t deltaX = newX - encoderX_position;
+        int32_t deltaY = newY - encoderY_position;
+        
+        if (currentMode == MANUAL) {
+            if (deltaX != 0) {
+                stepperX.move(deltaX * STEPS_PER_ENCODER_CLICK);
+                Serial.print("X move: ");
+                Serial.println(deltaX * STEPS_PER_ENCODER_CLICK);
+            }
+            
+            if (deltaY != 0) {
+                stepperY.move(deltaY * STEPS_PER_ENCODER_CLICK);
+                Serial.print("Y move: ");
+                Serial.println(deltaY * STEPS_PER_ENCODER_CLICK);
+            }
+        }
+        
+        // Update stored positions
         encoderX_position = newX;
         encoderY_position = newY;
     }
+    
+    // Always run steppers (must be called every loop)
+    stepperX.run();
+    stepperY.run();
     
     // Update display at fixed rate or when something changes
     if ((now - lastDisplayUpdate >= DISPLAY_UPDATE_MS) || encoderMoved) {
