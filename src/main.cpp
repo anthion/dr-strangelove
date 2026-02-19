@@ -8,8 +8,8 @@
 
 // Pin definitions
 #define LCD_CS    10
-#define LCD_DC    9
-#define LCD_RST   8
+#define LCD_DC    8
+#define LCD_RST   9
 
 #define ENCODER_X_ADDR  0x36
 #define ENCODER_Y_ADDR  0x37
@@ -17,17 +17,17 @@
 #define SS_NEOPIXEL 6
 
 // Motor pins
-#define STEP_X    0
-#define DIR_X     1
-#define STEP_Y    2
-#define DIR_Y     3
+#define DIR_X     0
+#define STEP_X    1
+#define DIR_Y     2
+#define STEP_Y    3
 #define MOTOR_EN  4
 
 // QPD analog inputs
-#define QPD_A     14  // Top right (A0)
-#define QPD_B     15  // Bottom right (A1)
-#define QPD_C     16  // Bottom left (A2)
-#define QPD_D     17  // Top left (A3)
+#define QPD_A     14  // Top right (A0)     A
+#define QPD_B     15  // Bottom right (A1)  B
+#define QPD_C     16  // Bottom left (A2)   C
+#define QPD_D     17  // Top left (A3)      D
 
 // QPD display on LEFT side of screen
 #define QPD_DISPLAY_X      10      
@@ -92,7 +92,7 @@ SystemMode lastMode = DISABLED;
 bool displayInitialized = false;
 
 
-const int STEPS_PER_ENCODER_CLICK = 10;  // Adjust for desired sensitivity
+const int STEPS_PER_ENCODER_CLICK = 100;  // Adjust for desired sensitivity
 
 
 void initializeQPDCanvas() {
@@ -404,6 +404,18 @@ void setup() {
 void loop() {
     unsigned long now = millis();
     
+      // DEBUG: Check motor enable state
+    static unsigned long lastDebug = 0;
+    if (now - lastDebug > 2000) {
+        Serial.print("Mode: ");
+        Serial.print(currentMode);
+        Serial.print(" | EN pin: ");
+        Serial.print(digitalRead(MOTOR_EN));
+        Serial.print(" | StepperX distToGo: ");
+        Serial.println(stepperX.distanceToGo());
+        lastDebug = now;
+    }
+
     // Always read QPD
     readQPD();
     
