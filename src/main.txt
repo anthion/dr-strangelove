@@ -70,7 +70,7 @@
 enum SystemMode {
     DISABLED,
     MANUAL,
-    CALIBRATE,
+    CALIBRATE,  // ADD THIS LINE
     AUTO
 };
 
@@ -355,6 +355,7 @@ void updateDisplayValues() {
     tft.setTextColor(ST77XX_YELLOW);
     tft.print(encoderY_position);
     
+    // ADD THESE LINES:
     // Update gain values
     tft.fillRect(265, 170, 50, 10, ST77XX_BLACK);
     tft.setCursor(265, 170);
@@ -516,7 +517,7 @@ void setup() {
 
     // Initialize display
     tft.init(240, 320);
-    tft.setRotation(3);
+    tft.setRotation(1);
     tft.fillScreen(ST77XX_BLACK);
     
     tft.setCursor(10, 10);
