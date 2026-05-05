@@ -89,8 +89,10 @@
 #define QPD_CROSSHAIR_HALF     6
 #define QPD_CROSSHAIR_LEN      (2 * QPD_CROSSHAIR_HALF + 1)
 
-// Scaling: QPD error counts -> canvas pixels
-#define QPD_ERROR_TO_PIXEL_DIV 8
+// Scaling: fractional QPD error -> canvas pixels.
+// errorX/Y range is roughly [-1.0, +1.0]; QPD_DISPLAY_GAIN of 100 maps an
+// error of 1.0 to 100 pixels off-center (the canvas half-width).
+#define QPD_DISPLAY_GAIN 100
 
 // LCD layout: data column on right side of screen
 // Labels at DATA_LABEL_X, values aligned at DATA_VALUE_X.
@@ -159,10 +161,10 @@ const unsigned long DEBOUNCE_MS = 50;
 // QPD state
 int qpd_a, qpd_b, qpd_c, qpd_d;
 int totalPower;
-int errorX, errorY;
+float errorX = 0, errorY = 0;
 
-int targetOffsetX = 0;  // Target offset for AUTO mode
-int targetOffsetY = 0;
+float targetOffsetX = 0;  // Target offset for AUTO mode (fractional error units)
+float targetOffsetY = 0;
 
 // Low-pass filtered QPD values
 float filtered_a = 0, filtered_b = 0, filtered_c = 0, filtered_d = 0;
@@ -191,16 +193,21 @@ bool displayInitialized = false;
 
 const int STEPS_PER_ENCODER_CLICK = 100;  // Adjust for desired sensitivity
 
-// Gain values for AUTO mode control
-float Kp_x = 0.07;  // Proportional gain for X axis
-float Kp_y = 0.07;  // Proportional gain for Y axis
-const float GAIN_INCREMENT = 0.01;  // How much gain changes per encoder click
+// Proportional gains for AUTO mode (after normalization, errors are fractional
+// in roughly [-1.0, +1.0]; gains are correspondingly larger than pre-normalization).
+float Kp_x = 70.0;
+float Kp_y = 70.0;
+const float GAIN_INCREMENT = 1.0;  // How much gain changes per encoder click
 
-// AUTO mode control parameters
-const int ERROR_DEADBAND = 10;      // Ignore errors smaller than this
-const int MAX_STEPS_PER_CYCLE = 50; // Maximum correction per update
-const int CONVERGED_THRESHOLD = 15; // Error threshold for "converged" status
+// AUTO mode control parameters (fractional error units after normalization)
+const float ERROR_DEADBAND      = 0.05;  // Ignore errors smaller than this
+const int   MAX_STEPS_PER_CYCLE = 50;    // Maximum correction per update
+const float CONVERGED_THRESHOLD = 0.075; // Error threshold for "converged" status
 const unsigned long AUTO_UPDATE_MS = 100; // Control loop rate (10Hz)
+
+// Minimum total QPD power for AUTO control to engage. Below this, the beam
+// is considered absent and AUTO bails rather than chasing noise.
+const int MIN_POWER_FOR_AUTO = 50;  // total ADC counts across all 4 quadrants
 
 // Stepper motion profile (default — FINE/COARSE refactor will add per-mode profiles)
 const float STEPPER_MAX_SPEED = 10000.0;  // steps/sec
@@ -297,15 +304,15 @@ void updateQPDCanvas() {
     drawQPDStaticElements();
 
     // Current QPD error as red dot
-    int dotX = (QPD_DISPLAY_SIZE / 2) + (errorX / QPD_ERROR_TO_PIXEL_DIV);
-    int dotY = (QPD_DISPLAY_SIZE / 2) - (errorY / QPD_ERROR_TO_PIXEL_DIV);
+    int dotX = (QPD_DISPLAY_SIZE / 2) + (int)(errorX * QPD_DISPLAY_GAIN);
+    int dotY = (QPD_DISPLAY_SIZE / 2) - (int)(errorY * QPD_DISPLAY_GAIN);
     dotX = constrain(dotX, QPD_DOT_MARGIN, QPD_DISPLAY_SIZE - QPD_DOT_MARGIN);
     dotY = constrain(dotY, QPD_DOT_MARGIN, QPD_DISPLAY_SIZE - QPD_DOT_MARGIN);
     qpd_canvas.fillCircle(dotX, dotY, QPD_DOT_RADIUS, ST77XX_RED);
 
     // AUTO-mode target offset as green crosshair
-    int targetX = (QPD_DISPLAY_SIZE / 2) + (targetOffsetX / QPD_ERROR_TO_PIXEL_DIV);
-    int targetY = (QPD_DISPLAY_SIZE / 2) - (targetOffsetY / QPD_ERROR_TO_PIXEL_DIV);
+    int targetX = (QPD_DISPLAY_SIZE / 2) + (int)(targetOffsetX * QPD_DISPLAY_GAIN);
+    int targetY = (QPD_DISPLAY_SIZE / 2) - (int)(targetOffsetY * QPD_DISPLAY_GAIN);
     targetX = constrain(targetX, QPD_DOT_MARGIN, QPD_DISPLAY_SIZE - QPD_DOT_MARGIN);
     targetY = constrain(targetY, QPD_DOT_MARGIN, QPD_DISPLAY_SIZE - QPD_DOT_MARGIN);
     qpd_canvas.drawFastHLine(targetX - QPD_CROSSHAIR_HALF, targetY, QPD_CROSSHAIR_LEN, ST77XX_GREEN);
@@ -451,12 +458,12 @@ void updateDisplayValues() {
     tft.fillRect(DATA_VALUE_X, ROW_ERR_X, DATA_VALUE_W, DATA_LINE_H, ST77XX_BLACK);
     tft.setCursor(DATA_VALUE_X, ROW_ERR_X);
     tft.setTextColor(ST77XX_YELLOW);
-    tft.print(errorX);
+    tft.print(errorX, 3);
 
     // Err Y
     tft.fillRect(DATA_VALUE_X, ROW_ERR_Y, DATA_VALUE_W, DATA_LINE_H, ST77XX_BLACK);
     tft.setCursor(DATA_VALUE_X, ROW_ERR_Y);
-    tft.print(errorY);
+    tft.print(errorY, 3);
 
     // Total power (full-column field; value can exceed narrow column)
     tft.fillRect(DATA_LABEL_X, ROW_POWER_VALUE, DATA_FIELD_W, DATA_LINE_H, ST77XX_BLACK);
@@ -490,8 +497,8 @@ void updateDisplayValues() {
     // Convergence status — AUTO mode only
     tft.fillRect(DATA_LABEL_X, ROW_CONVERGED, DATA_FIELD_W, DATA_LINE_H, ST77XX_BLACK);
     if (currentMode == AUTO) {
-        bool converged = (abs(errorX - targetOffsetX) < CONVERGED_THRESHOLD &&
-                          abs(errorY - targetOffsetY) < CONVERGED_THRESHOLD);
+        bool converged = (fabsf(errorX - targetOffsetX) < CONVERGED_THRESHOLD &&
+                          fabsf(errorY - targetOffsetY) < CONVERGED_THRESHOLD);
         tft.setCursor(DATA_LABEL_X, ROW_CONVERGED);
         if (converged) {
             tft.setTextColor(ST77XX_GREEN);
@@ -509,7 +516,7 @@ void updateDisplayValues() {
 
 /**
  * @brief Reads all four QPD channels, applies low-pass filtering, and
- *        computes X/Y error and total power.
+ *        computes intensity-normalized X/Y error and total power.
  *
  * Called from loop() every iteration (no rate limiting). Each channel:
  * - analogRead() at the resolution set in setup() (10-bit, 0–1023)
@@ -519,22 +526,24 @@ void updateDisplayValues() {
  *   in qpd_a/b/c/d are for downstream use and display.
  *
  * Computed quantities:
- * - errorX = (A + B) - (C + D)  → right minus left (positive = beam right)
- * - errorY = (A + D) - (B + C)  → top minus bottom (positive = beam up)
  * - totalPower = A + B + C + D  → sum across all quadrants
+ * - errorX = ((A + B) - (C + D)) / totalPower  → fractional, right minus left
+ * - errorY = ((A + D) - (B + C)) / totalPower  → fractional, top minus bottom
  *
- * @note errorX and errorY are currently in raw ADC counts, so their
- *       magnitude scales with totalPower. This causes the same physical
- *       beam offset to read as different error values at different beam
- *       intensities, and is the reason different sensors currently need
- *       different Kp values. Normalization (divide by totalPower) is
- *       planned but not yet implemented — see project notes.
+ * Errors are in roughly [-1.0, +1.0] and represent fractional beam offset,
+ * making them independent of beam intensity. A given physical misalignment
+ * produces the same error value at any laser power, so a single Kp works
+ * across sensors and across power levels.
+ *
+ * @note When totalPower is below MIN_POWER_FOR_AUTO (beam absent or
+ *       sensor disconnected), errors are forced to zero rather than
+ *       computed from noise. runAutoControl() also checks totalPower
+ *       before issuing corrections.
  *
  * @note Filter time constant is fixed in samples (~1/α ≈ 20 samples),
  *       not in wall-clock time. Effective cutoff frequency therefore
  *       depends on loop rate, which varies with display/SPI activity.
- *       Acceptable for 10 Hz drift correction; would need rework for
- *       a tighter control loop.
+ *       Acceptable for 10 Hz drift correction.
  */
 void readQPD() {
 
@@ -549,12 +558,19 @@ void readQPD() {
     qpd_c = (int)filtered_c;
     qpd_d = (int)filtered_d;
 
-    // Calculate errors
-    errorX = (qpd_a + qpd_b) - (qpd_c + qpd_d);  // Right - Left
-    errorY = (qpd_a + qpd_d) - (qpd_b + qpd_c);  // Top - Bottom
-
-    // Total power check
+    // Total power across all quadrants
     totalPower = qpd_a + qpd_b + qpd_c + qpd_d;
+
+    // Normalized errors: fractional offset, intensity-independent.
+    // Guard against divide-by-zero / no-beam: if totalPower is below the
+    // noise floor, treat errors as zero (no signal to act on).
+    if (totalPower >= MIN_POWER_FOR_AUTO) {
+        errorX = (float)((qpd_a + qpd_b) - (qpd_c + qpd_d)) / (float)totalPower;
+        errorY = (float)((qpd_a + qpd_d) - (qpd_b + qpd_c)) / (float)totalPower;
+    } else {
+        errorX = 0.0;
+        errorY = 0.0;
+    }
 }
 
 /**
@@ -581,11 +597,14 @@ void readQPD() {
  *   here if the Y stepper drives the beam the wrong way after a
  *   hardware change.
  *
- * @note No totalPower threshold check — if the beam walks off the QPD,
- *       totalPower drops and (because errors are not yet normalized)
- *       errorX/Y shrink with it. Authority fades smoothly to zero
- *       rather than failing cleanly. Adding a minimum-power cutout
- *       is on the second-pass list along with error normalization.
+ * @note Bails out via early return if totalPower < MIN_POWER_FOR_AUTO
+ *       (no beam present). readQPD() also forces errors to zero in this
+ *       case, so the guard is belt-and-suspenders, but the explicit
+ *       early return makes the intent obvious.
+ *
+ * @note Effective deadband is set by ERROR_DEADBAND in fractional units.
+ *       After normalization, deadband and Kp values were re-tuned from
+ *       their pre-normalization counterparts.
  *
  * @note Effective deadband is max(ERROR_DEADBAND, 1/Kp) due to integer
  *       truncation of the step command. With Kp=0.07, errors below ~14
@@ -596,36 +615,37 @@ void readQPD() {
  *       or zero-steady-state requirements.
  */
 void runAutoControl() {
+    // Bail out if the beam isn't on the sensor — don't chase noise
+    if (totalPower < MIN_POWER_FOR_AUTO) {
+        return;
+    }
+
     // Relative errors: track the user-defined target, not QPD center
-    int relativeErrorX = errorX - targetOffsetX;
-    int relativeErrorY = errorY - targetOffsetY;
+    float relativeErrorX = errorX - targetOffsetX;
+    float relativeErrorY = errorY - targetOffsetY;
 
     // Deadband: ignore small errors
-    int activeErrorX = (abs(relativeErrorX) > ERROR_DEADBAND) ? relativeErrorX : 0;
-    int activeErrorY = (abs(relativeErrorY) > ERROR_DEADBAND) ? relativeErrorY : 0;
+    float activeErrorX = (fabsf(relativeErrorX) > ERROR_DEADBAND) ? relativeErrorX : 0.0f;
+    float activeErrorY = (fabsf(relativeErrorY) > ERROR_DEADBAND) ? relativeErrorY : 0.0f;
 
-    if (activeErrorX != 0) {
-
-        int stepsX = (int)(Kp_x * activeErrorX);
-        
+    if (activeErrorX != 0.0f) {
+        int stepsX = (int)roundf(Kp_x * activeErrorX);
         stepsX = constrain(stepsX, -MAX_STEPS_PER_CYCLE, MAX_STEPS_PER_CYCLE);
         stepperX.move(stepsX);
 
         Serial.print("AUTO X: error=");
-        Serial.print(relativeErrorX);
+        Serial.print(relativeErrorX, 3);
         Serial.print(" steps=");
         Serial.println(stepsX);
     }
 
-    if (activeErrorY != 0) {
-
-        int stepsY = (int)(Kp_y * activeErrorY);
-        
+    if (activeErrorY != 0.0f) {
+        int stepsY = (int)roundf(Kp_y * activeErrorY);
         stepsY = constrain(stepsY, -MAX_STEPS_PER_CYCLE, MAX_STEPS_PER_CYCLE);
         stepperY.move(-stepsY);  // Y inverted: see "Sign conventions" in doc comment
 
         Serial.print("AUTO Y: error=");
-        Serial.print(relativeErrorY);
+        Serial.print(relativeErrorY, 3);
         Serial.print(" steps=");
         Serial.println(-stepsY);
     }
@@ -910,9 +930,9 @@ void loop() {
             targetOffsetX = errorX;
             targetOffsetY = errorY;
             Serial.print("Target set: X=");
-            Serial.print(targetOffsetX);
+            Serial.print(targetOffsetX, 3);
             Serial.print(" Y=");
-            Serial.println(targetOffsetY);
+            Serial.println(targetOffsetY, 3);
         } else {
             // Target is set — clear back to center
             targetOffsetX = 0;
@@ -945,13 +965,13 @@ void loop() {
             // Encoders adjust gains, not motor position
             if (deltaX != 0) {
                 Kp_x += deltaX * GAIN_INCREMENT;
-                Kp_x = constrain(Kp_x, 0.0, 10.0);
+                Kp_x = constrain(Kp_x, 0.0, 1000.0);
                 Serial.print("Kp_x: ");
                 Serial.println(Kp_x);
             }
             if (deltaY != 0) {
                 Kp_y += deltaY * GAIN_INCREMENT;
-                Kp_y = constrain(Kp_y, 0.0, 10.0);
+                Kp_y = constrain(Kp_y, 0.0, 1000.0);
                 Serial.print("Kp_y: ");
                 Serial.println(Kp_y);
             }
@@ -987,8 +1007,8 @@ void loop() {
         Serial.print(" B:"); Serial.print(qpd_b);
         Serial.print(" C:"); Serial.print(qpd_c);
         Serial.print(" D:"); Serial.print(qpd_d);
-        Serial.print(" | ErrX:"); Serial.print(errorX);
-        Serial.print(" ErrY:"); Serial.print(errorY);
+        Serial.print(" | ErrX:"); Serial.print(errorX, 3);
+        Serial.print(" ErrY:"); Serial.print(errorY, 3);
         Serial.print(" | Total:"); Serial.println(totalPower);
     }
 }
