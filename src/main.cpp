@@ -52,6 +52,7 @@
 #include <Adafruit_seesaw.h>
 #include <seesaw_neopixel.h>
 #include <AccelStepper.h>
+#include "logo.h"
 
 // Pin definitions
 #define LCD_CS    10
@@ -176,8 +177,21 @@ const unsigned long DISPLAY_UPDATE_MS = 100;  // 10Hz
 
 unsigned long lastAutoUpdate = 0;  // Timing for AUTO mode control loop
 
-// Debug gates (uncomment to enable)
-//#define DEBUG_FIRST_LOOP   // Print mode/EN/lastMode on first loop iteration
+// Telemetry
+bool telemetryActive = false;
+uint32_t telemetrySampleCount = 0;
+unsigned long lastTelemetryUpdate = 0;
+const unsigned long TELEMETRY_UPDATE_MS = 100;  // 10 Hz
+
+struct TelemetrySample {
+    unsigned long timestamp_us;
+    uint32_t      sample;
+    int           q1, q2, q3, q4;
+    float         errorX, errorY;
+    int           totalPower;
+    int           cmd_steps_x;
+    int           cmd_steps_y;
+};
 
 // LED Colors
 const uint32_t COLOR_DISABLED = 0x100000;
@@ -245,6 +259,85 @@ static void drawQPDStaticElements() {
     qpd_canvas.print("C");
     qpd_canvas.setCursor(QPD_DISPLAY_SIZE - 15, QPD_DISPLAY_SIZE - 15);
     qpd_canvas.print("B");
+}
+
+/**
+ * @brief Draws the EOTech logo bitmap at 2x scale centered on the screen.
+ *
+ * Renders EOTECH_logo_bits (60x42, XBM format, LSB-first) at 2x magnification
+ * by drawing a 2x2 filled rectangle for each set bit. Color is EOTech copper
+ * (RGB 184, 115, 51). Origin is calculated to center the 120x84 result on the
+ * 320x240 display.
+ *
+ * Called once from setup() during the init screen sequence, before the main
+ * display layout is drawn. Safe to call any time after tft.init().
+ *
+ * @note pgm_read_byte() is used to read from PROGMEM. If PROGMEM causes
+ *       issues on this toolchain, remove PROGMEM from logo.h and drop the
+ *       pgm_read_byte() wrapper — direct array access will work identically.
+ */
+void drawLogoScaled() {
+    const int scale       = 2;
+    const int dw          = EOTECH_LOGO_WIDTH  * scale;   // 120
+    const int dh          = EOTECH_LOGO_HEIGHT * scale;   // 84
+    const int originX     = (320 - dw) / 2;               // 100
+    const int originY     = (240 - dh) / 2 - 20;          // 58 — slightly above center
+    const uint16_t copper = tft.color565(184, 115, 51);
+    const int bytesPerRow = (EOTECH_LOGO_WIDTH + 7) / 8;  // 8
+
+    for (int y = 0; y < EOTECH_LOGO_HEIGHT; y++) {
+        for (int x = 0; x < EOTECH_LOGO_WIDTH; x++) {
+            uint8_t b = pgm_read_byte(&EOTECH_logo_bits[y * bytesPerRow + x / 8]);
+            if (b & (1 << (x % 8))) {
+                tft.fillRect(originX + x * scale, originY + y * scale, scale, scale, copper);
+            }
+        }
+    }
+}
+
+/**
+ * @brief Emits the CSV header block to Serial on telemetry start.
+ *
+ * Prints comment lines (prefixed #) describing the log format, followed
+ * by a single CSV header row. Called once each time telemetry is enabled.
+ *
+ * QPD channel mapping: q1=A(top-right), q2=B(bottom-right),
+ *                      q3=C(bottom-left), q4=D(top-left)
+ * Error normalization: errorX = ((q1+q2)-(q3+q4)) / totalPower
+ *                      errorY = ((q1+q4)-(q2+q3)) / totalPower
+ * cmd_steps_x/y: controller output (0 when motors disabled)
+ */
+void emitTelemetryHeader() {
+    Serial.println("# Dr. Strangelove telemetry log");
+    Serial.println("# sample_rate_hz=10");
+    Serial.println("# q1=QPD_A(top-right) q2=QPD_B(bottom-right) q3=QPD_C(bottom-left) q4=QPD_D(top-left)");
+    Serial.println("# errorX=((q1+q2)-(q3+q4))/totalPower  errorY=((q1+q4)-(q2+q3))/totalPower");
+    Serial.println("# cmd_steps_x/y=0 when motors disabled");
+    Serial.println("timestamp_us,sample,q1,q2,q3,q4,errorX,errorY,totalPower,cmd_steps_x,cmd_steps_y");
+}
+
+/**
+ * @brief Formats and emits one CSV data row to Serial.
+ *
+ * Called once per telemetry tick from loop(). Writes all fields from
+ * the populated TelemetrySample struct as a comma-separated line.
+ * Timestamp comes from the Teensy micros() counter at sample time,
+ * not PC receive time, to avoid USB buffering jitter.
+ *
+ * @param s  Populated TelemetrySample struct for this tick.
+ */
+void emitTelemetry(const TelemetrySample& s) {
+    Serial.print(s.timestamp_us);  Serial.print(',');
+    Serial.print(s.sample);        Serial.print(',');
+    Serial.print(s.q1);            Serial.print(',');
+    Serial.print(s.q2);            Serial.print(',');
+    Serial.print(s.q3);            Serial.print(',');
+    Serial.print(s.q4);            Serial.print(',');
+    Serial.print(s.errorX, 6);     Serial.print(',');
+    Serial.print(s.errorY, 6);     Serial.print(',');
+    Serial.print(s.totalPower);    Serial.print(',');
+    Serial.print(s.cmd_steps_x);   Serial.print(',');
+    Serial.println(s.cmd_steps_y);
 }
 
 /**
@@ -507,7 +600,16 @@ void updateDisplayValues() {
             tft.setTextColor(ST77XX_RED);
             tft.print("CORRECTING");
         }
+    }
 
+    // Telemetry indicator — visible in all modes
+    tft.fillRect(DATA_LABEL_X, ROW_CONVERGED + DATA_LINE_H + 2, DATA_FIELD_W, DATA_LINE_H, ST77XX_BLACK);
+    if (telemetryActive) {
+        tft.setCursor(DATA_LABEL_X, ROW_CONVERGED + DATA_LINE_H + 2);
+        tft.setTextColor(ST77XX_RED);
+        tft.print("* REC ");
+        tft.setTextColor(ST77XX_WHITE);
+        tft.print(telemetrySampleCount);
     }
 
     // Refresh QPD visualization (left side)
@@ -633,10 +735,6 @@ void runAutoControl() {
         stepsX = constrain(stepsX, -MAX_STEPS_PER_CYCLE, MAX_STEPS_PER_CYCLE);
         stepperX.move(stepsX);
 
-        Serial.print("AUTO X: error=");
-        Serial.print(relativeErrorX, 3);
-        Serial.print(" steps=");
-        Serial.println(stepsX);
     }
 
     if (activeErrorY != 0.0f) {
@@ -644,10 +742,6 @@ void runAutoControl() {
         stepsY = constrain(stepsY, -MAX_STEPS_PER_CYCLE, MAX_STEPS_PER_CYCLE);
         stepperY.move(-stepsY);  // Y inverted: see "Sign conventions" in doc comment
 
-        Serial.print("AUTO Y: error=");
-        Serial.print(relativeErrorY, 3);
-        Serial.print(" steps=");
-        Serial.println(-stepsY);
     }
 }
 
@@ -715,26 +809,22 @@ void handleModeButton() {
         case DISABLED:
             currentMode = MANUAL;
             digitalWrite(MOTOR_EN, LOW);
-            Serial.println("Mode: MANUAL");
 
             break;
         case MANUAL:
             currentMode = CALIBRATE;
             digitalWrite(MOTOR_EN, HIGH);
-            Serial.println("Mode: CALIBRATE");
-
+            
             break;
         case CALIBRATE:
             currentMode = AUTO;
             digitalWrite(MOTOR_EN, LOW);
-            Serial.println("Mode: AUTO");
-
+            
             break;
         case AUTO:
             currentMode = DISABLED;
             digitalWrite(MOTOR_EN, HIGH);
-            Serial.println("Mode: DISABLED");
-
+            
             break;
     }
 
@@ -756,8 +846,8 @@ void handleModeButton() {
  * - Initial button state captured after seesaw boards have settled
  * - Initial QPD read, full LCD layout draw, first display refresh
  *
- * @note Encoder init failure is non-fatal: an error is printed to Serial
- *       but setup() continues. Subsequent reads against a missing encoder
+ * @note Encoder init failure is non-fatal: an error is shown on the LCD
+ *       and setup() continues. Subsequent reads against a missing encoder
  *       will return stale or zero values silently. An on-screen warning
  *       on init failure is on the second-pass list.
  *
@@ -781,14 +871,15 @@ void setup() {
     stepperY.setMaxSpeed(STEPPER_MAX_SPEED);
     stepperY.setAcceleration(STEPPER_ACCEL);
 
-    // LCD
+    // LCD — init screen: logo centered, status text below
     tft.init(240, 320);
     tft.setRotation(3);
     tft.fillScreen(ST77XX_BLACK);
-    tft.setCursor(10, 10);
+    drawLogoScaled();
     tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(2);
-    tft.println("Initializing...");
+    tft.setCursor(88, 162);
+    tft.print("Initializing...");
 
     // ADC: 10-bit (0–1023)
     analogReadResolution(10);
@@ -798,9 +889,11 @@ void setup() {
 
     // Encoder X (with NeoPixel)
     if (!encoderX.begin(ENCODER_X_ADDR)) {
-        Serial.println("ERROR: Encoder X not found!");
+        tft.setTextColor(ST77XX_RED);
+        tft.setTextSize(1);
+        tft.setCursor(88, 182);
+        tft.print("ERROR: Encoder X not found!");
     } else {
-        Serial.println("Encoder X initialized");
         encoderX.pinMode(SS_SWITCH, INPUT_PULLUP);
         encoderX_position = encoderX.getEncoderPosition();
 
@@ -816,9 +909,11 @@ void setup() {
 
     // Encoder Y (with NeoPixel)
     if (!encoderY.begin(ENCODER_Y_ADDR)) {
-        Serial.println("ERROR: Encoder Y not found!");
+        tft.setTextColor(ST77XX_RED);
+        tft.setTextSize(1);
+        tft.setCursor(88, 192);
+        tft.print("ERROR: Encoder Y not found!");
     } else {
-        Serial.println("Encoder Y initialized");
         encoderY.pinMode(SS_SWITCH, INPUT_PULLUP);
         encoderY_position = encoderY.getEncoderPosition();
 
@@ -839,7 +934,7 @@ void setup() {
     lastButtonYTime = millis();
 
     // Let seesaw boards settle fully before first frame
-    delay(1000);
+    delay(3000);
     updateModeLEDs();
 
     // Initial QPD read so first display frame has real values
@@ -885,25 +980,9 @@ void setup() {
  *       above 10 Hz; the SPI blit self-throttles since each update
  *       takes a few ms.
  *
- * @note Serial output is verbose (per-cycle QPD dump, per-correction
- *       AUTO prints, per-delta encoder prints). Fine on USB serial;
- *       gate behind DEBUG_* defines if it ever drowns out other logs.
  */
 void loop() {
     unsigned long now = millis();
-
-#ifdef DEBUG_FIRST_LOOP
-    static bool firstLoop = true;
-    if (firstLoop) {
-        Serial.print("=== FIRST LOOP === Mode: ");
-        Serial.print(currentMode);
-        Serial.print(" | EN: ");
-        Serial.print(digitalRead(MOTOR_EN));
-        Serial.print(" | lastMode: ");
-        Serial.println(lastMode);
-        firstLoop = false;
-    }
-#endif
 
     // Always read QPD
     readQPD();
@@ -923,21 +1002,26 @@ void loop() {
     }
     lastButtonX = buttonX;
 
-    // Button Y with debounce — toggles AUTO target offset
+    // Button Y with debounce — toggles telemetry (any mode) or AUTO target offset
     if (buttonY == 1 && lastButtonY == 0 && (now - lastButtonYTime > DEBOUNCE_MS)) {
-        if (targetOffsetX == 0 && targetOffsetY == 0) {
-            // No target set — capture current error as new target
-            targetOffsetX = errorX;
-            targetOffsetY = errorY;
-            Serial.print("Target set: X=");
-            Serial.print(targetOffsetX, 3);
-            Serial.print(" Y=");
-            Serial.println(targetOffsetY, 3);
+        if (currentMode == DISABLED) {
+            // In DISABLED: Y button toggles telemetry on/off
+            telemetryActive = !telemetryActive;
+            if (telemetryActive) {
+                telemetrySampleCount = 0;
+                emitTelemetryHeader();
+            }
         } else {
-            // Target is set — clear back to center
-            targetOffsetX = 0;
-            targetOffsetY = 0;
-            Serial.println("Target cleared (back to center)");
+            // In all other modes: Y button toggles AUTO target offset
+            if (targetOffsetX == 0 && targetOffsetY == 0) {
+                // No target set — capture current error as new target
+                targetOffsetX = errorX;
+                targetOffsetY = errorY;
+            } else {
+                // Target is set — clear back to center
+                targetOffsetX = 0;
+                targetOffsetY = 0;
+            }
         }
         lastButtonYTime = now;
     }
@@ -952,13 +1036,11 @@ void loop() {
         if (currentMode == MANUAL) {
             if (deltaX != 0) {
                 stepperX.move(deltaX * STEPS_PER_ENCODER_CLICK);
-                Serial.print("X move: ");
-                Serial.println(deltaX * STEPS_PER_ENCODER_CLICK);
+                
             }
             if (deltaY != 0) {
                 stepperY.move(deltaY * STEPS_PER_ENCODER_CLICK);
-                Serial.print("Y move: ");
-                Serial.println(deltaY * STEPS_PER_ENCODER_CLICK);
+                
             }
         }
         else if (currentMode == CALIBRATE) {
@@ -966,14 +1048,12 @@ void loop() {
             if (deltaX != 0) {
                 Kp_x += deltaX * GAIN_INCREMENT;
                 Kp_x = constrain(Kp_x, 0.0, 1000.0);
-                Serial.print("Kp_x: ");
-                Serial.println(Kp_x);
+                
             }
             if (deltaY != 0) {
                 Kp_y += deltaY * GAIN_INCREMENT;
                 Kp_y = constrain(Kp_y, 0.0, 1000.0);
-                Serial.print("Kp_y: ");
-                Serial.println(Kp_y);
+                
             }
         }
 
@@ -990,6 +1070,26 @@ void loop() {
         }
     }
 
+    // Telemetry tick — 10 Hz, any mode
+    if (telemetryActive) {
+        if (now - lastTelemetryUpdate >= TELEMETRY_UPDATE_MS) {
+            TelemetrySample s;
+            s.timestamp_us = micros();
+            s.sample       = telemetrySampleCount++;
+            s.q1           = qpd_a;
+            s.q2           = qpd_b;
+            s.q3           = qpd_c;
+            s.q4           = qpd_d;
+            s.errorX       = errorX;
+            s.errorY       = errorY;
+            s.totalPower   = totalPower;
+            s.cmd_steps_x  = 0;
+            s.cmd_steps_y  = 0;
+            emitTelemetry(s);
+            lastTelemetryUpdate = now;
+        }
+    }
+
     // Required: advance step pulses every iteration
     stepperX.run();
     stepperY.run();
@@ -1002,14 +1102,6 @@ void loop() {
         updateDisplayValues();
         lastDisplayUpdate = now;
 
-        // Periodic Serial dump
-        Serial.print("QPD A:"); Serial.print(qpd_a);
-        Serial.print(" B:"); Serial.print(qpd_b);
-        Serial.print(" C:"); Serial.print(qpd_c);
-        Serial.print(" D:"); Serial.print(qpd_d);
-        Serial.print(" | ErrX:"); Serial.print(errorX, 3);
-        Serial.print(" ErrY:"); Serial.print(errorY, 3);
-        Serial.print(" | Total:"); Serial.println(totalPower);
     }
 }
 
