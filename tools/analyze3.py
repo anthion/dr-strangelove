@@ -71,7 +71,7 @@ def analyze_one(csv_path):
         print(f"  WARNING: only {len(df)} samples — analysis may be unreliable")
 
     # --- Time axis ---
-    t = (df['timestamp_us'] - df['timestamp_us'].iloc[0]) / 1e6
+    t = df['t_sec']
     t_min = t / 60.0
 
     # --- Sample-gap detection ---
